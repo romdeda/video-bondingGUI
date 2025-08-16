@@ -21,14 +21,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path client | Out-Null
           New-Item -ItemType Directory -Force -Path server | Out-Null
           New-Item -ItemType Directory -Force -Path engine | Out-Null
+          New-Item -ItemType File -Force -Path engine/__init__.py | Out-Null
 
           @"
           PyQt5>=5.15,<6
           psutil>=5.9
           "@ | Set-Content -Encoding UTF8 requirements.txt
 
+          # engine/bonding_common.py
           @"
-          import sys, time, threading, socket, subprocess, platform, os
+          import sys, time, threading, socket, subprocess, platform, os, shutil
           def log(*a):
               ts = time.strftime("%Y-%m-%d %H:%M:%S")
               msg = " ".join(str(x) for x in a)
@@ -53,21 +55,21 @@ jobs:
                       if dt>=1.0:
                           self.rate=self.count/dt; self.count=0; self.last=now; return self.rate
                   return None
-          def bundled_ffmpeg_path():
+          def bundled_tool(name):
               if getattr(sys, "frozen", False):
-                  base = sys._MEIPASS
-                  f = os.path.join(base, "ffmpeg.exe")
-                  if os.path.exists(f): return f
-                  f2 = os.path.join(os.path.dirname(sys.argv[0]), "ffmpeg.exe")
-                  if os.path.exists(f2): return f2
+                  base = getattr(sys, "_MEIPASS", os.path.dirname(sys.argv[0]))
+                  p = os.path.join(base, name)
+                  if os.path.exists(p): return p
+                  alt = os.path.join(os.path.dirname(sys.argv[0]), name)
+                  if os.path.exists(alt): return alt
               else:
                   here = os.path.dirname(__file__)
-                  f3 = os.path.join(here, "..", "ffmpeg.exe")
-                  if os.path.exists(f3): return f3
-              import shutil
-              return shutil.which("ffmpeg")
+                  p3 = os.path.join(here, "..", name)
+                  if os.path.exists(p3): return p3
+              return shutil.which(name)
           "@ | Set-Content -Encoding UTF8 engine/bonding_common.py
 
+          # engine/bonding_engine_client.py
           @"
           import sys, json, socket, time, argparse
           from bonding_common import log, RateCounter
@@ -113,6 +115,7 @@ jobs:
           if __name__=='__main__': main()
           "@ | Set-Content -Encoding UTF8 engine/bonding_engine_client.py
 
+          # engine/bonding_engine_server.py
           @"
           import sys, json, socket, time, argparse, select
           from bonding_common import log
@@ -150,6 +153,7 @@ jobs:
           if __name__=='__main__': main()
           "@ | Set-Content -Encoding UTF8 engine/bonding_engine_server.py
 
+          # client/client_gui.py (без импортов из engine; использует локальную bundled_tool)
           @"
           import sys, os, json, subprocess, shutil, time
           from PyQt5.QtWidgets import (QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -157,7 +161,6 @@ jobs:
               QFrame, QStyleFactory, QCheckBox, QMessageBox)
           from PyQt5.QtCore import Qt, QTimer, QDateTime
           from PyQt5.QtGui import QPalette, QColor
-          from engine.bonding_common import bundled_ffmpeg_path
 
           def hline():
               line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
@@ -170,18 +173,16 @@ jobs:
                   pal.setColor(QPalette.Highlight, QColor(64,128,255)); pal.setColor(QPalette.HighlightedText, Qt.white)
               else: pal = app.palette()
               app.setPalette(pal)
-
           def bundled_tool(name):
-              import shutil
-              if getattr(sys, "frozen", False):
-                  base = sys._MEIPASS
+              if getattr(sys, 'frozen', False):
+                  base = getattr(sys, '_MEIPASS', os.path.dirname(sys.argv[0]))
                   p = os.path.join(base, name)
                   if os.path.exists(p): return p
                   alt = os.path.join(os.path.dirname(sys.argv[0]), name)
                   if os.path.exists(alt): return alt
               else:
                   here = os.path.dirname(__file__)
-                  p3 = os.path.join(here, "..", name)
+                  p3 = os.path.join(here, '..', name)
                   if os.path.exists(p3): return p3
               return shutil.which(name)
 
@@ -260,6 +261,7 @@ jobs:
                   apply_theme(self.app,'Light')
                   self.apply_source(initial=True)
 
+              # utils
               def log(self,msg):
                   ts=QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')
                   self.logs.appendPlainText(f'[{ts}] {msg}')
@@ -267,6 +269,7 @@ jobs:
               def _ffprobe(self): return bundled_tool('ffprobe.exe')
               def _ffplay(self):  return bundled_tool('ffplay.exe')
 
+              # source
               def pick_file(self):
                   p,_=QFileDialog.getOpenFileName(self,'Pick video','','Video (*.mp4 *.mkv *.mov *.ts);;All files (*)')
                   if p: self.list.addItem(QListWidgetItem(p))
@@ -276,7 +279,6 @@ jobs:
               def remove_files(self):
                   for it in self.list.selectedItems():
                       self.list.takeItem(self.list.row(it))
-
               def apply_source(self, initial=False):
                   new_idx = self.src_mode.currentIndex()
                   new_desc = self._source_desc(new_idx)
@@ -286,17 +288,14 @@ jobs:
                   self.current_source = new_idx
                   self.log(f'Applied source: {new_desc}')
                   self.update_source_info()
-
               def _source_desc(self, idx):
                   names = ['File/Playlist','Camera (DirectShow)','vMix Video','NDI (requires NDI Runtime)','SRT Listener']
                   return names[idx] if 0 <= idx < len(names) else 'Unknown'
-
               def update_source_info(self):
                   fmt='—'; v='—'; fps='—'; a='—'
                   ffprobe = self._ffprobe()
                   if not ffprobe:
-                      self.src_info.setText(f'Source: {self._source_desc(self.current_source)}  |  Format: ?  |  Video: ?  |  FPS: ?  |  Audio: ?')
-                      return
+                      self.src_info.setText(f'Source: {self._source_desc(self.current_source)}  |  Format: ?  |  Video: ?  |  FPS: ?  |  Audio: ?'); return
                   try:
                       if self.current_source == 0:
                           if self.list.count() == 0:
@@ -326,15 +325,13 @@ jobs:
                   except Exception as e:
                       self.log(f'ffprobe error: {e}')
                   self.src_info.setText(f'Source: {self._source_desc(self.current_source)}  |  Format: {fmt}  |  Video: {v}  |  FPS: {fps}  |  Audio: {a}')
-
               def _fps_str(self, fr):
                   try:
-                      num, den = fr.split('/')
-                      den = float(den) if float(den)!=0 else 1.0
+                      num, den = fr.split('/'); den = float(den) if float(den)!=0 else 1.0
                       return f'{float(num)/den:.2f}'
-                  except Exception:
-                      return fr
+                  except Exception: return fr
 
+              # preview
               def preview_play(self):
                   self.preview_stop()
                   ply = self._ffplay()
@@ -358,19 +355,18 @@ jobs:
                       self.preview = subprocess.Popen(cmd); self.log('Preview started')
                   except Exception as e:
                       self.log(f'Preview error: {e}')
-
               def preview_stop(self):
                   if self.preview and self.preview.poll() is None:
                       try: self.preview.terminate()
                       except: pass
                   self.preview = None
 
+              # bonding + ffmpeg
               def _write_client_cfg(self, path):
                   ports=[int(self.base_port.value())+i for i in range(int(self.paths.value()))]
                   enables=[self.path_enable[i].isChecked() for i in range(int(self.paths.value()))]
                   cfg={'server_ip': self.server_ip.text().strip(),'server_ports': ports,'ts_chunk': int(self.ts_chunk.value()),'enable_paths': enables}
                   open(path,'w',encoding='utf-8').write(json.dumps(cfg,ensure_ascii=False,indent=2)); return cfg
-
               def start_all(self):
                   self.stop_all()
                   ff=self._ffmpeg()
@@ -405,7 +401,6 @@ jobs:
                       self.eng = subprocess.Popen([engine,'--config',cfg_path], stdin=self.ff.stdout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT); self.log('engine client started')
                   except Exception as e:
                       self.log(f'engine error: {e}')
-
               def stop_all(self):
                   self.preview_stop()
                   for p in [self.eng,self.ff]:
@@ -413,7 +408,6 @@ jobs:
                           try: p.terminate()
                           except: pass
                   self.eng=None; self.ff=None; self.log('Stopped')
-
               def _pump_logs(self):
                   for p in [self.ff,self.eng]:
                       if p and p.stdout:
@@ -428,13 +422,13 @@ jobs:
               sys.exit(app.exec_())
           "@ | Set-Content -Encoding UTF8 client/client_gui.py
 
+          # server/server_gui.py (без импортов из engine)
           @"
           import sys, os, json, subprocess, shutil, time
           from PyQt5.QtWidgets import (QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
               QGroupBox, QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QStyleFactory, QFrame, QMessageBox)
           from PyQt5.QtCore import Qt, QTimer, QDateTime
           from PyQt5.QtGui import QPalette, QColor
-          from engine.bonding_common import bundled_ffmpeg_path
 
           def hline():
               line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
@@ -447,18 +441,16 @@ jobs:
                   pal.setColor(QPalette.Highlight, QColor(64,128,255)); pal.setColor(QPalette.HighlightedText, Qt.white)
               else: pal = app.palette()
               app.setPalette(pal)
-
           def bundled_tool(name):
-              import shutil, sys, os
-              if getattr(sys, "frozen", False):
-                  base = sys._MEIPASS
+              if getattr(sys, 'frozen', False):
+                  base = getattr(sys, '_MEIPASS', os.path.dirname(sys.argv[0]))
                   p = os.path.join(base, name)
                   if os.path.exists(p): return p
                   alt = os.path.join(os.path.dirname(sys.argv[0]), name)
                   if os.path.exists(alt): return alt
               else:
                   here = os.path.dirname(__file__)
-                  p3 = os.path.join(here, "..", name)
+                  p3 = os.path.join(here, '..', name)
                   if os.path.exists(p3): return p3
               return shutil.which(name)
 
@@ -528,14 +520,12 @@ jobs:
                       self.pub=subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT); self.log('publish started (bundled ffmpeg)')
                   except Exception as e:
                       self.log(f'publish error: {e}')
-
               def stop_all(self):
                   for p in [self.pub,self.eng]:
                       if p and p.poll() is None:
                           try: p.terminate()
                           except: pass
                   self.pub=None; self.eng=None; self.log('Stopped')
-
               def _pump_logs(self):
                   for p in [self.eng,self.pub]:
                       if p and p.stdout:
@@ -543,7 +533,6 @@ jobs:
                               line=p.stdout.readline().decode(errors='ignore')
                               if line: self.logs.appendPlainText(line.rstrip())
                           except Exception: pass
-
               def log(self,msg):
                   ts=QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')
                   self.logs.appendPlainText(f'[{ts}] {msg}')

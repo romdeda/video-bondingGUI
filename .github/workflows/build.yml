@@ -2,14 +2,13 @@ name: build-bonding-full-selfcontained
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,9 +27,9 @@ jobs:
           psutil>=5.9
           "@ | Set-Content -Encoding UTF8 requirements.txt
 
-          # ---------- engine/bonding_common.py (утилиты, если понадобится дальше) ----------
+          # ---------- engine/bonding_common.py ----------
           @"
-          import sys, time, threading, socket, subprocess, platform, os, shutil
+          import sys, time, os, shutil
           def log(*a):
               ts = time.strftime("%Y-%m-%d %H:%M:%S")
               print(f"[{ts}] " + " ".join(str(x) for x in a), flush=True)
@@ -48,7 +47,7 @@ jobs:
               return shutil.which(name)
           "@ | Set-Content -Encoding UTF8 engine/bonding_common.py
 
-          # ---------- engine/bonding_engine_client.py (взвешенный RR + чтение weights.json) ----------
+          # ---------- engine/bonding_engine_client.py (взвешенный RR + weights.json) ----------
           @"
           import sys, json, socket, time, argparse
 
@@ -139,7 +138,7 @@ jobs:
           if __name__=='__main__': main()
           "@ | Set-Content -Encoding UTF8 engine/bonding_engine_client.py
 
-          # ---------- engine/bonding_engine_server.py (эха для QoS + склейка) ----------
+          # ---------- engine/bonding_engine_server.py (эхо QoS + склейка) ----------
           @"
           import sys, json, socket, time, argparse, select
 
@@ -193,7 +192,7 @@ jobs:
           if __name__=='__main__': main()
           "@ | Set-Content -Encoding UTF8 engine/bonding_engine_server.py
 
-          # ---------- client/client_gui.py (preview 30%, QoS-пробник, 6 путей) ----------
+          # ---------- client/client_gui.py (preview 30%, QoS, 6 путей) ----------
           @"
           import sys, os, json, subprocess, shutil, time, re, socket, struct
           from PyQt5.QtWidgets import (
@@ -477,7 +476,7 @@ jobs:
                   if mode==0:
                       items=[self.list.item(i).text() for i in range(self.list.count())]
                       if not items: self.log('Add files to playlist.'); return
-                      open('playlist.txt','w',encoding='utf-8').write("`n".join([f"file '{p}'" for p in items]))
+                      open('playlist.txt','w',encoding='utf-8').write("\n".join([f"file '{p}'" for p in items]))
                       cmd+=['-f','concat','-safe','0','-i','playlist.txt']
                   elif mode==1: cmd+=['-f','dshow','-i','video=Integrated Camera']
                   elif mode==2: cmd+=['-f','dshow','-i','video=vMix Video']
@@ -559,7 +558,7 @@ jobs:
               sys.exit(app.exec_())
           "@ | Set-Content -Encoding UTF8 client/client_gui.py
 
-          # ---------- server/server_gui.py (без импортов из engine) ----------
+          # ---------- server/server_gui.py ----------
           @"
           import sys, os, json, subprocess, shutil, time
           from PyQt5.QtWidgets import (QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,

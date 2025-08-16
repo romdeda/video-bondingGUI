@@ -1,0 +1,333 @@
+name: Build Bonding (one-file repo)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout (empty repo ok)
+        uses: actions/checkout@v4
+
+      - name: Generate project files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force client | Out-Null
+          New-Item -ItemType Directory -Force server | Out-Null
+          New-Item -ItemType Directory -Force engine | Out-Null
+          # requirements
+          @"
+          PyQt5>=5.15,<6
+          "@ | Set-Content -Encoding UTF8 requirements.txt
+
+          # engine/bonding_common.py
+          @"
+          import sys, time, threading
+          def log(*a):
+              ts = time.strftime("%Y-%m-%d %H:%M:%S")
+              msg = " ".join(str(x) for x in a)
+              sys.stdout.write(f"[{ts}] {msg}\n"); sys.stdout.flush()
+          class RateCounter:
+              def __init__(self):
+                  self.lock = threading.Lock(); self.count=0; self.last_ts=time.time(); self.rate=0.0
+              def add(self,n=1):
+                  with self.lock: self.count+=n
+              def tick(self):
+                  with self.lock:
+                      now=time.time(); dt=now-self.last_ts
+                      if dt>=1.0:
+                          self.rate=self.count/dt; self.count=0; self.last_ts=now; return self.rate
+                  return None
+          "@ | Set-Content -Encoding UTF8 engine/bonding_common.py
+
+          # engine/bonding_engine_client.py
+          @"
+          import sys, time
+          from bonding_common import log, RateCounter
+          def main():
+              log("[engine-client] start")
+              rc = RateCounter()
+              try:
+                  while True:
+                      data = sys.stdin.buffer.read1(32*1024)
+                      if not data:
+                          time.sleep(0.05); continue
+                      rc.add(1)
+                      r = rc.tick()
+                      if r is not None:
+                          log(f"[engine-client] chunks/s={r:.1f}")
+              except KeyboardInterrupt:
+                  pass
+          if __name__ == "__main__":
+              main()
+          "@ | Set-Content -Encoding UTF8 engine/bonding_engine_client.py
+
+          # engine/bonding_engine_server.py
+          @"
+          import time
+          from bonding_common import log
+          def main():
+              log("[engine-server] start")
+              try:
+                  while True:
+                      time.sleep(1.0)
+                      log("[engine-server] tick")
+              except KeyboardInterrupt:
+                  pass
+          if __name__ == "__main__":
+              main()
+          "@ | Set-Content -Encoding UTF8 engine/bonding_engine_server.py
+
+          # client/client_gui.py
+          @"
+          import sys
+          from PyQt5.QtWidgets import (
+              QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
+              QLabel, QPushButton, QGroupBox, QLineEdit, QSpinBox, QComboBox,
+              QPlainTextEdit, QListWidget, QListWidgetItem, QFileDialog, QFrame, QStyleFactory
+          )
+          from PyQt5.QtCore import Qt, QTimer, QDateTime
+          from PyQt5.QtGui import QPalette, QColor
+
+          def hline():
+              line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
+
+          def apply_theme(app, mode):
+              app.setStyle(QStyleFactory.create("Fusion"))
+              pal = QPalette()
+              if mode.lower().startswith("dark"):
+                  pal.setColor(QPalette.Window, QColor(37,40,45))
+                  pal.setColor(QPalette.WindowText, Qt.white)
+                  pal.setColor(QPalette.Base, QColor(24,26,30))
+                  pal.setColor(QPalette.Text, Qt.white)
+                  pal.setColor(QPalette.Button, QColor(45,47,52))
+                  pal.setColor(QPalette.ButtonText, Qt.white)
+                  pal.setColor(QPalette.Highlight, QColor(64,128,255))
+                  pal.setColor(QPalette.HighlightedText, Qt.white)
+              else:
+                  pal = app.palette()
+              app.setPalette(pal)
+
+          class ClientGUI(QWidget):
+              def __init__(self, app):
+                  super().__init__()
+                  self.app = app
+                  self.setWindowTitle("Bonding Client")
+                  self.resize(1100, 780)
+
+                  root = QVBoxLayout(self)
+                  top = QHBoxLayout()
+                  title = QLabel("Bonding Client")
+                  title.setStyleSheet("font-size:16pt; font-weight:700")
+                  top.addWidget(title); top.addStretch(1)
+                  top.addWidget(QLabel("Theme")); self.theme = QComboBox(); self.theme.addItems(["Light","Dark"])
+                  self.theme.currentTextChanged.connect(lambda m: apply_theme(self.app, m))
+                  top.addWidget(self.theme)
+                  root.addLayout(top); root.addWidget(hline())
+
+                  tabs = QTabWidget(); root.addWidget(tabs, 1)
+
+                  tab_src = QWidget(); sL = QVBoxLayout(tab_src)
+                  g_src = QGroupBox("Video Source"); g_srcL = QHBoxLayout(g_src)
+                  self.src_mode = QComboBox(); self.src_mode.addItems(["File/Playlist","Camera (DirectShow)","vMix Video","NDI (placeholder)"])
+                  g_srcL.addWidget(QLabel("Type:")); g_srcL.addWidget(self.src_mode)
+                  self.btn_pick = QPushButton("Pick file"); self.btn_pick.clicked.connect(self.pick_file); g_srcL.addWidget(self.btn_pick)
+                  sL.addWidget(g_src)
+                  g_pl = QGroupBox("Playlist"); gplL = QVBoxLayout(g_pl)
+                  self.list = QListWidget(); gplL.addWidget(self.list)
+                  plBtns = QHBoxLayout(); btn_add = QPushButton("Add"); btn_rm = QPushButton("Remove selected")
+                  btn_add.clicked.connect(self.add_files); btn_rm.clicked.connect(self.remove_files)
+                  plBtns.addWidget(btn_add); plBtns.addWidget(btn_rm); gplL.addLayout(plBtns)
+                  sL.addWidget(g_pl)
+                  tabs.addTab(tab_src, "Source")
+
+                  tab_net = QWidget(); nL = QVBoxLayout(tab_net)
+                  g_net = QGroupBox("Server & Paths"); g_netL = QHBoxLayout(g_net)
+                  self.server_ip = QLineEdit("127.0.0.1")
+                  self.base_port = QSpinBox(); self.base_port.setRange(1000,65535); self.base_port.setValue(12001)
+                  self.paths = QSpinBox(); self.paths.setRange(1,16); self.paths.setValue(4)
+                  g_netL.addWidget(QLabel("Server IP:")); g_netL.addWidget(self.server_ip)
+                  g_netL.addWidget(QLabel("Base port:")); g_netL.addWidget(self.base_port)
+                  g_netL.addWidget(QLabel("Paths:")); g_netL.addWidget(self.paths)
+                  nL.addWidget(g_net); tabs.addTab(tab_net, "Network")
+
+                  tab_out = QWidget(); oL = QVBoxLayout(tab_out)
+                  g_enc = QGroupBox("Encoding"); g_encL = QHBoxLayout(g_enc)
+                  self.vcodec = QComboBox(); self.vcodec.addItems(["libx264","h264_nvenc","libx265"])
+                  self.profile = QComboBox(); self.profile.addItems(["baseline","main","high"])
+                  self.vbitrate = QSpinBox(); self.vbitrate.setRange(500,20000); self.vbitrate.setValue(6000)
+                  self.preset = QComboBox(); self.preset.addItems(["ultrafast","veryfast","faster","fast","medium"])
+                  for w in (QLabel("Codec:"), self.vcodec, QLabel("Profile:"), self.profile, QLabel("Bitrate kbps:"), self.vbitrate, QLabel("Preset:"), self.preset):
+                      g_encL.addWidget(w)
+                  oL.addWidget(g_enc); tabs.addTab(tab_out, "Output")
+
+                  tab_log = QWidget(); lL = QVBoxLayout(tab_log)
+                  self.logs = QPlainTextEdit(); self.logs.setReadOnly(True)
+                  self.logs.setStyleSheet("background:#0b0f14; color:#cde4ff;")
+                  lL.addWidget(self.logs, 1); tabs.addTab(tab_log, "Logs")
+
+                  ctr = QHBoxLayout(); ctr.addStretch(1)
+                  self.btn_start = QPushButton("Start (mock)"); self.btn_stop = QPushButton("Stop")
+                  ctr.addWidget(self.btn_start); ctr.addWidget(self.btn_stop); root.addLayout(ctr)
+                  self.btn_start.clicked.connect(lambda: self.log("Start pressed (mock)."))
+                  self.btn_stop.clicked.connect(lambda: self.log("Stop pressed."))
+
+                  self.t = QTimer(self); self.t.timeout.connect(self.tick); self.t.start(1000)
+                  apply_theme(self.app, "Light")
+
+              def pick_file(self):
+                  p,_ = QFileDialog.getOpenFileName(self,"Pick video","","Video (*.mp4 *.mkv *.mov *.ts);;All files (*)")
+                  if p: self.list.addItem(QListWidgetItem(p))
+
+              def add_files(self):
+                  files,_ = QFileDialog.getOpenFileNames(self,"Add to playlist","","Video (*.mp4 *.mkv *.mov *.ts);;All files (*)")
+                  for f in files: self.list.addItem(QListWidgetItem(f))
+
+              def remove_files(self):
+                  for it in self.list.selectedItems():
+                      self.list.takeItem(self.list.row(it))
+
+              def tick(self):
+                  ts = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+                  self.logs.appendPlainText(f"[{ts}] Tick")
+
+              def log(self,msg):
+                  ts = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+                  self.logs.appendPlainText(f"[{ts}] {msg}")
+
+          if __name__ == "__main__":
+              app = QApplication(sys.argv)
+              w = ClientGUI(app); w.show()
+              sys.exit(app.exec_())
+          "@ | Set-Content -Encoding UTF8 client/client_gui.py
+
+          # server/server_gui.py
+          @"
+          import sys
+          from PyQt5.QtWidgets import (
+              QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
+              QLabel, QPushButton, QGroupBox, QLineEdit, QSpinBox, QComboBox,
+              QPlainTextEdit, QStyleFactory, QFrame
+          )
+          from PyQt5.QtCore import Qt, QTimer, QDateTime
+          from PyQt5.QtGui import QPalette, QColor
+
+          def hline():
+              line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); return line
+
+          def apply_theme(app, mode):
+              app.setStyle(QStyleFactory.create("Fusion"))
+              pal = QPalette()
+              if mode.lower().startswith("dark"):
+                  pal.setColor(QPalette.Window, QColor(37,40,45))
+                  pal.setColor(QPalette.WindowText, Qt.white)
+                  pal.setColor(QPalette.Base, QColor(24,26,30))
+                  pal.setColor(QPalette.Text, Qt.white)
+                  pal.setColor(QPalette.Button, QColor(45,47,52))
+                  pal.setColor(QPalette.ButtonText, Qt.white)
+                  pal.setColor(QPalette.Highlight, QColor(64,128,255))
+                  pal.setColor(QPalette.HighlightedText, Qt.white)
+              else:
+                  pal = app.palette()
+              app.setPalette(pal)
+
+          class ServerGUI(QWidget):
+              def __init__(self, app):
+                  super().__init__()
+                  self.app = app
+                  self.setWindowTitle("Bonding Server")
+                  self.resize(1000, 720)
+
+                  root = QVBoxLayout(self)
+                  top = QHBoxLayout()
+                  title = QLabel("Bonding Server")
+                  title.setStyleSheet("font-size:16pt; font-weight:700")
+                  top.addWidget(title); top.addStretch(1)
+                  top.addWidget(QLabel("Theme")); self.theme = QComboBox(); self.theme.addItems(["Light","Dark"])
+                  self.theme.currentTextChanged.connect(lambda m: apply_theme(self.app, m))
+                  top.addWidget(self.theme)
+                  root.addLayout(top); root.addWidget(hline())
+
+                  tabs = QTabWidget(); root.addWidget(tabs, 1)
+
+                  tab_net = QWidget(); nL = QVBoxLayout(tab_net)
+                  g_listen = QGroupBox("Listen ports"); gL = QHBoxLayout(g_listen)
+                  self.base_port = QSpinBox(); self.base_port.setRange(1000,65535); self.base_port.setValue(12001)
+                  self.paths = QSpinBox(); self.paths.setRange(1,16); self.paths.setValue(4)
+                  gL.addWidget(QLabel("Base port:")); gL.addWidget(self.base_port)
+                  gL.addWidget(QLabel("Paths:")); gL.addWidget(self.paths)
+                  nL.addWidget(g_listen); tabs.addTab(tab_net, "Network")
+
+                  tab_out = QWidget(); oL = QVBoxLayout(tab_out)
+                  g_pub = QGroupBox("Publish"); gP = QHBoxLayout(g_pub)
+                  self.proto = QComboBox(); self.proto.addItems(["SRT","RTMP"])
+                  self.srt_host = QLineEdit("0.0.0.0")
+                  self.srt_port = QSpinBox(); self.srt_port.setRange(1000,65535); self.srt_port.setValue(9999)
+                  self.srt_mode = QComboBox(); self.srt_mode.addItems(["listener","caller"])
+                  self.rtmp_url = QLineEdit("rtmp://live.twitch.tv/app/STREAM_KEY")
+                  for w in (QLabel("Protocol:"), self.proto, QLabel("SRT host:"), self.srt_host, QLabel("port:"), self.srt_port, QLabel("mode:"), self.srt_mode, QLabel("RTMP URL:"), self.rtmp_url):
+                      gP.addWidget(w)
+                  oL.addWidget(g_pub); tabs.addTab(tab_out, "Output")
+
+                  tab_log = QWidget(); lL=QVBoxLayout(tab_log)
+                  self.logs = QPlainTextEdit(); self.logs.setReadOnly(True)
+                  self.logs.setStyleSheet("background:#0b0f14; color:#cde4ff;")
+                  lL.addWidget(self.logs, 1); tabs.addTab(tab_log, "Logs")
+
+                  ctr = QHBoxLayout(); ctr.addStretch(1)
+                  self.btn_start = QPushButton("Start (mock)"); self.btn_stop = QPushButton("Stop")
+                  ctr.addWidget(self.btn_start); ctr.addWidget(self.btn_stop); root.addLayout(ctr)
+                  self.btn_start.clicked.connect(lambda: self.log("Start pressed (mock)."))
+                  self.btn_stop.clicked.connect(lambda: self.log("Stop pressed."))
+                  self.t = QTimer(self); self.t.timeout.connect(self.tick); self.t.start(1000)
+                  apply_theme(self.app, "Light")
+
+              def tick(self):
+                  ts = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+                  self.logs.appendPlainText(f"[{ts}] Tick")
+
+              def log(self, msg):
+                  ts = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+                  self.logs.appendPlainText(f"[{ts}] {msg}")
+
+          if __name__ == "__main__":
+              app = QApplication(sys.argv)
+              w = ServerGUI(app); w.show()
+              sys.exit(app.exec_())
+          "@ | Set-Content -Encoding UTF8 server/server_gui.py
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build engines
+        run: |
+          pyinstaller -F engine/bonding_engine_client.py -n BondingEngineClient
+          pyinstaller -F engine/bonding_engine_server.py -n BondingEngineServer
+
+      - name: Build GUIs
+        run: |
+          pyinstaller -w -F client/client_gui.py -n BondingClient
+          pyinstaller -w -F server/server_gui.py -n BondingServer
+
+      - name: Upload EXE artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bonding_EXE_Artifacts
+          path: |
+            dist/BondingClient.exe
+            dist/BondingServer.exe
+            dist/BondingEngineClient.exe
+            dist/BondingEngineServer.exe
